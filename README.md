@@ -105,7 +105,7 @@ queue is shown in the transcript.
 | `LLM_COMPACT_TAIL_CHARS` | window / 8 × 4 | characters of recent turns kept verbatim across a compaction |
 | `LLM_TOOL_RESULT_CHARS` | window / 8 × 4 | character budget for one tool result |
 | `LLM_EVICT_CHARS` | window / 4 × 4 | character budget for the tool results in one request |
-| `LLM_OUTPUT_RESERVATION` | `4096` | tokens held back for the model's own answer |
+| `LLM_OUTPUT_RESERVATION` | window / 8 | tokens held back for the model's own answer — the request's `max_tokens`, taken out of the window as well |
 | `LLM_SAFETY_MARGIN` | `1024` | tokens held back for the provider's framing |
 | `NOVA_APPROVAL` | `prompt` | `auto` to skip the per-action prompt, as `--auto-approve` |
 | `NOVA_COMMAND_TIMEOUT_SECS` | `120` | how long a command may run before its tree is killed |

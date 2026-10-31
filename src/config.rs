@@ -474,8 +474,27 @@ pub const DEFAULT_MAX_SEARCH_FILE_BYTES: u64 = 2 * 1024 * 1024;
 /// The default cap on how long one search may run.
 pub const DEFAULT_SEARCH_TIMEOUT_SECS: u64 = 30;
 
-/// The default tokens held back for the model's reply.
-pub const DEFAULT_OUTPUT_RESERVATION: usize = 4096;
+/// The fraction of the context window held back for the model's reply.
+///
+/// This figure is the request's `max_tokens`, and it is also subtracted from
+/// the window to leave the input budget, so a fixed one is wrong at both ends.
+/// 4096 was too small for the models this runs: a reasoning model spends the
+/// budget thinking, then hits the cap with nothing to show for the turn, which
+/// rig reports as `finish_reason=Length` with no answer rather than as a
+/// truncated reply — the work is lost, not cut short. A fixed 32768 is wrong
+/// the other way: the 4096 window a 6 GB card serves by default would have no
+/// input budget left at all, and every request would be refused.
+///
+/// An eighth of the window is 32768 at the 256k default, ~25k on Anthropic's
+/// 200k and ~16k on OpenAI's 128k, which covers a reasoning pass plus a file
+/// rewritten whole — the longest single answer the agent is asked for — and
+/// leaves seven eighths of the window for the request itself.
+const OUTPUT_RESERVATION_WINDOW_FRACTION: u32 = 8;
+
+/// The tokens held back for the model's reply, derived from the window.
+pub fn output_reservation_for(window: u32) -> usize {
+    (window / OUTPUT_RESERVATION_WINDOW_FRACTION) as usize
+}
 
 /// The default tokens held back as a safety margin.
 pub const DEFAULT_SAFETY_MARGIN: usize = 1024;
@@ -549,7 +568,7 @@ impl Config {
                 output_reservation: parse_positive(
                     std::env::var("LLM_OUTPUT_RESERVATION").ok().as_deref(),
                 )
-                .unwrap_or(DEFAULT_OUTPUT_RESERVATION),
+                .unwrap_or_else(|| output_reservation_for(window)),
                 safety_margin: parse_positive(std::env::var("LLM_SAFETY_MARGIN").ok().as_deref())
                     .unwrap_or(DEFAULT_SAFETY_MARGIN),
             },
@@ -595,7 +614,7 @@ impl Config {
                 evict_chars: eviction_budget_chars(window),
                 compact_at: DEFAULT_COMPACT_AT,
                 tail_chars: tail_budget_chars(window),
-                output_reservation: DEFAULT_OUTPUT_RESERVATION,
+                output_reservation: output_reservation_for(window),
                 safety_margin: DEFAULT_SAFETY_MARGIN,
             },
             approval: ApprovalMode::Prompt,
@@ -632,6 +651,7 @@ impl Config {
         self.context.tool_result_chars = tool_result_budget_chars(window);
         self.context.evict_chars = eviction_budget_chars(window);
         self.context.tail_chars = tail_budget_chars(window);
+        self.context.output_reservation = output_reservation_for(window);
         self
     }
 
@@ -677,7 +697,9 @@ mod tests {
         let config = Config::defaults();
         assert_eq!(
             config.context.request_budget(),
-            DEFAULT_NUM_CTX as usize - DEFAULT_OUTPUT_RESERVATION - DEFAULT_SAFETY_MARGIN
+            DEFAULT_NUM_CTX as usize
+                - output_reservation_for(DEFAULT_NUM_CTX)
+                - DEFAULT_SAFETY_MARGIN
         );
     }
 
@@ -685,6 +707,22 @@ mod tests {
     fn a_window_smaller_than_the_reservation_leaves_no_budget() {
         let config = Config::defaults().with_window(1024);
         assert_eq!(config.context.request_budget(), 0);
+    }
+
+    #[test]
+    fn the_reply_budget_scales_with_the_window() {
+        // 32768 at the 256k default is what a reasoning pass plus a whole-file
+        // rewrite needs. A fixed figure that size would instead leave the 4096
+        // window a 6 GB card serves by default with no input budget at all, so
+        // the reservation is a fraction of the window rather than a constant.
+        assert_eq!(output_reservation_for(DEFAULT_NUM_CTX), 32_768);
+        for window in [4_096u32, 6_000, 20_000, 128_000, 200_000] {
+            let config = Config::defaults().with_window(window);
+            assert!(
+                config.context.request_budget() > 0,
+                "a {window}-token window must still leave room to send a request"
+            );
+        }
     }
 
     #[test]

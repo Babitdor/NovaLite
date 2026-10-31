@@ -272,7 +272,7 @@ fn a_prompt_that_alone_cannot_fit_is_refused_without_calling_the_model() {
         "the error should say what to change:\n{text}"
     );
     assert!(
-        text.contains("14880"),
+        text.contains(&rt.config().context.request_budget().to_string()),
         "the error should name the budget it was measured against:\n{text}"
     );
     assert_eq!(
