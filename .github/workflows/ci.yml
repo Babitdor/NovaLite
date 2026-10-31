@@ -1,0 +1,90 @@
+name: CI
+
+# The gates the release acceptance criteria name, run on the three platforms
+# the crate claims to support. Windows is not optional here: the confinement
+# code has a Windows-only branch (junctions, drive-relative paths, the Job
+# Object that kills a command's process tree), and a Linux-only matrix would
+# leave the platform the author actually uses untested.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # A warning in a dependency is not this crate's problem, but a warning in
+  # this crate is, and `-D warnings` on clippy is what enforces it.
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One platform failing should not cancel the others: the failure is
+      # usually platform-specific, and the other two results are the evidence
+      # that says so.
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the toolchain
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+
+      - name: Cache the build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-${{ env.RUSTFLAGS }}
+
+      - name: Formatting
+        run: cargo fmt --all -- --check
+
+      - name: Check
+        run: cargo check --all-targets --all-features --locked
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
+
+      - name: Tests
+        run: cargo test --all-targets --all-features --locked
+
+      - name: Documentation tests
+        run: cargo test --doc --all-features --locked
+
+      - name: Release build
+        run: cargo build --release --locked
+
+  msrv:
+    name: minimum supported Rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The version is read from `Cargo.toml` rather than written here, so the
+      # claim in the manifest and the version CI builds with cannot drift. A
+      # hard-coded number in this file would be a second place to update and
+      # the one that gets forgotten.
+      - name: Read the declared minimum
+        id: msrv
+        shell: bash
+        run: |
+          version=$(grep -m1 '^rust-version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "building with $version"
+
+      - name: Install the minimum toolchain
+        run: rustup toolchain install ${{ steps.msrv.outputs.version }} --profile minimal
+
+      # `--locked` is the point: the floor is the highest `rust-version` in the
+      # lock file, so a dependency bump that raises it has to fail here rather
+      # than in a user's build.
+      - name: Check against the minimum
+        run: cargo +${{ steps.msrv.outputs.version }} check --all-targets --all-features --locked

@@ -1,0 +1,7 @@
+# Build output (this repo builds into B:\cargo-target-rust-agent, but keep the
+# local default out of the tree too).
+/target
+
+# Local agent state: trust/approval policy, plans and the personal wiki.
+/.nova
+/.claude-flow

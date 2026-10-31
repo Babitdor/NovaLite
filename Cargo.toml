@@ -1,0 +1,91 @@
+[package]
+name = "rust-agent"
+version = "0.1.0"
+edition = "2021"
+# The floor is the highest `rust-version` declared anywhere in `Cargo.lock`,
+# which is `rig`'s. Declaring it here is what turns the claim into a check:
+# cargo refuses an older toolchain and names the crate, instead of failing
+# somewhere inside a dependency with an error about a feature or a syntax.
+rust-version = "1.95"
+
+# The package keeps its name so the library crate stays `rust_agent` (every
+# test and `main.rs` imports it by that path); the binary the user runs is
+# `nova-lite`, which is what the banner and the rail already call it.
+[[bin]]
+name = "nova-lite"
+path = "src/main.rs"
+
+[dependencies]
+rig = { version = "0.44", features = ["derive"] }
+ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
+crossterm = { version = "0.29", features = ["event-stream"] }
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+anyhow = "1"
+tui-markdown = { version = "0.3.11", features = ["highlight-code"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"
+glob = "0.3"
+# Search. `ignore` is the walker ripgrep uses: it reads `.gitignore`,
+# `.ignore` and the global ignore file, and it is the only way to get the
+# rules right without reimplementing them. `globset` compiles a path pattern
+# once and matches it against every entry, which is what makes a bounded walk
+# affordable. `grep-searcher`/`grep-regex` stream a file through a matcher
+# instead of reading it whole, so a 2 GB log costs a buffer rather than 2 GB.
+ignore = "0.4"
+globset = "0.4"
+grep-searcher = "0.1"
+grep-regex = "0.1"
+# Typed errors at the library boundary. `anyhow` stays for the executable,
+# where the context only the binary has (which directory, which command line)
+# is what makes a failure actionable.
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2.5"
+
+# Killing a command has to kill what it spawned, and neither platform offers
+# that from the standard library. On Windows a Job Object with
+# `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` takes the whole tree with it; on Unix
+# `setsid` plus `killpg` does. Both are target-gated so neither is built on
+# the other platform.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+# `test-utils` gives `MockCompletionModel`, so the render and event paths can
+# be exercised without a live provider. Resolver v2 keeps it out of normal builds.
+rig = { version = "0.44", features = ["derive", "test-utils"] }
+# Each test gets its own workspace, so the tests are independent of the order
+# they run in and of each other's leftovers.
+tempfile = "3"
+
+# Panics are a bug in a program that owns a terminal: the terminal is left in
+# raw mode on the alternate screen, so the user's shell comes back with no echo
+# and no cursor. These are denied rather than warned so a new one cannot be
+# merged by accident, and the test modules opt out where a panic *is* the
+# assertion.
+[lints.rust]
+unsafe_code = "deny"
+unused_must_use = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+# `print_stdout`/`print_stderr` are not denied: the binary writes the usage and
+# the version to stdout before the terminal is taken over, and the examples
+# print the stream. The TUI itself never prints, and `logging.rs` is what keeps
+# the library's own output off the terminal.

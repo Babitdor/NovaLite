@@ -1,0 +1,10 @@
+[package]
+name = "fixture"
+version = "0.0.0"
+edition = "2021"
+
+# A fixture is a package in its own right, and it is copied into a temporary
+# directory before a task runs, so nothing here is ever built in place. The
+# empty workspace table is what stops cargo from walking up and adopting the
+# repository's own manifest as its workspace root.
+[workspace]

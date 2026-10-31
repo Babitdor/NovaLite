@@ -1,0 +1,32 @@
+[
+  {
+    "name": "read-and-report",
+    "prompt": "Read src/lib.rs and tell me, in one sentence, what the greeting function returns.",
+    "fixture": "evals/fixtures/read-and-report",
+    "expect": {
+      "output_contains": ["hello from the fixture"]
+    }
+  },
+  {
+    "name": "fix-the-bug",
+    "prompt": "The tests in this crate fail. Run them, find out why, fix the bug in src/lib.rs, and run the tests again to prove the fix works.",
+    "fixture": "evals/fixtures/fix-the-bug",
+    "expect": {
+      "files_contain": {
+        "src/lib.rs": ["a + b"]
+      },
+      "output_contains": ["test result: ok"]
+    }
+  },
+  {
+    "name": "add-a-function",
+    "prompt": "Add a function called `double` to src/lib.rs that returns twice its argument, with a test for it, and run the tests to prove it works.",
+    "fixture": "evals/fixtures/add-a-function",
+    "expect": {
+      "files_contain": {
+        "src/lib.rs": ["fn double"]
+      },
+      "output_contains": ["test result: ok"]
+    }
+  }
+]
