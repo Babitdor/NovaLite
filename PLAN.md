@@ -1,313 +1,189 @@
-# PLAN — streaming identity, approval targets, tool-row clarity
+# PLAN — a frontend-design prompt and a clearer tool contract
 
 ## Goal
 
-Fix the confirmed defects in nova-lite's tool streaming and path approval, and
-make a failed or refused tool call readable without expanding it, while keeping
-the existing architecture, safety properties, and test suite intact.
+Make the agent good at UI/frontend work and precise about which tool to reach
+for, by condensing the project's `SKILL.md` (the frontend-design skill) into the
+system prompt and sharpening the seven tool descriptions — no new tool, no new
+dependency, and no growth of the default `terse` budget beyond two lines.
 
-## Confirmed findings
+## What exists now (read this session)
 
-Read from `src/session.rs`, `src/event.rs`, `src/app.rs`, `src/runtime.rs`,
-`src/workspace.rs`, `src/render.rs`, and rig 0.44's `StreamEvent`:
+**Prompts — `src/prompts.rs` (207 lines).** Three constants. `SYSTEM_PROMPT`
+(the `full` style) walks six numbered stages, `Analyze` to `Finish`.
+`TERSE_PROMPT` is the default (`LLM_PROMPT_STYLE`, `config.rs:409`) and is 752
+characters. Five unit tests pin the text: every `Stage::ALL` label appears in
+`SYSTEM_PROMPT`; `SYSTEM_PROMPT` contains `cargo check`, `unverified` and
+`do not retry a call the user denied`; terse is under 900 characters and under
+half the full prompt; terse keeps `tool-call interface`, `Read a file before you
+edit it`, `same arguments`, `cargo check`, `unverified`.
 
-1. **Argument streaming loses part identity.** `StreamEvent::Arguments { part,
-   json }` is translated to `Event::ToolArgsDelta(String)`. `Emitter` appends
-   every part's fragments into one `args: String`, and `App` appends them into
-   one `pending_args` and writes the result to `tool_idx` (the newest block).
-   Two calls whose arguments stream at the same time corrupt each other's live
-   display and activity row. The committed call overwrites `args` later, so the
-   final transcript hides the corruption; it is visible only while streaming.
-2. **A symlink escape asks about the wrong directory.** `Runtime::resolve_asking`
-   catches `OutsideWorkspace` from `resolve_existing` (which canonicalises and
-   finds the real target outside), then calls `Workspace::target_of`, which is
-   lexical. For `link/secret.txt` where `link` points outside, the prompt shows
-   a path that looks inside and grants `root/link`. `Workspace::grant` records
-   that lexical path, but the real target is outside it, so the re-resolution
-   fails again. The user approves and is still refused; the question repeats on
-   every access.
-3. **A failed or refused call hides its reason.** The collapsed tool row shows
-   only the line count and `failed` / `denied`; the first line of the result,
-   which says why, requires expanding the card.
-4. **History on cancellation is a known design limit, not a regression.** rig's
-   `PromptResponse.messages` is only available on `FinalResponse`, and
-   `drive()` deliberately appends history only then. A user cancellation drops
-   the stream before rig can return `PromptError::Cancelled { chat_history }`.
-   The app keeps the user prompt and the runtime journal keeps the effects.
-   Reconstructing a partial assistant/tool history is a separate design change;
-   it is out of scope for this plan.
+**Tools — `src/tools.rs`.** Seven `Tool` impls (`read_file` 330, `write_file`
+448, `edit_file` 627, `shell` 715, `list_dir` 789, `grep` 881, `glob` 981).
+Registered and schema-counted by `for_each_tool!` in `src/agent.rs` over
+`tools::TOOL_NAMES`, and the schema characters are added to every request's
+budget (`fixed_chars`, `agent.rs:994`). No test pins a description's text, so
+the descriptions are free to improve but are paid for on every call.
+
+**The gap.** `frontend` appears nowhere under `src/`. The design guidance the
+user wants the agent to have lives only in the repo-root `SKILL.md` (~5.5k
+characters), which the model never sees. The tool descriptions state what each
+tool does but not which one to reach for, so tool choice is left to the model.
+
+**Already-handled, not in scope.** `RepairToolCalls` in `src/agent.rs` repairs
+wrong tool names, salvages malformed arguments and retries a tool call written
+as prose. Tool errors already carry the message meant for the model
+(`ToolError::into_tool_error`). Neither needs changing.
 
 ## Steps
 
-### 1. Add a failing end-to-end test for concurrent argument streaming
+### 1. Pin the new prompt requirements as failing tests
 
-Add `concurrent_tool_arguments_stay_with_their_own_call` to
-`tests/stream_render.rs`. Script two calls with interleaved
-`ToolCallNameDelta` / `ToolCallArgumentsDelta` fragments (`read_file` part 0 and
-`grep` part 1), sample the app after each event, and assert that while both
-placeholders are streaming each block holds only its own arguments and each
-`ToolCall` activity row names its own call.
+Add to `src/prompts.rs`'s `mod tests`:
 
-**Check:** `cargo test --test stream_render concurrent_tool_arguments` fails on
-the current code because the first block's `args` stays empty while the second
-receives both calls' fragments.
+- `the_prompt_asks_for_a_design_plan_before_the_markup` — `SYSTEM_PROMPT`
+  contains `palette`, `layout`, and the ordering claim (the plan is stated
+  before markup is written).
+- `the_prompt_names_the_tells_of_a_generated_page` — `SYSTEM_PROMPT` names at
+  least three specific defaults to avoid (cream/serif/terracotta, identical
+  rounded cards, all-caps eyebrows, decorative numbering).
+- `the_prompt_is_honest_about_not_seeing_the_page` — `SYSTEM_PROMPT` contains
+  `cannot see the page` and `unverified`: the agent has no browser, so the
+  honest limit has to be stated where the design rules are.
+- `the_prompt_names_every_registered_tool` — walks
+  `crate::tools::TOOL_NAMES.split(", ")` and asserts each name appears in
+  `SYSTEM_PROMPT`. This is the tool-use map's test, the same shape as the
+  existing stage test: a tool the prompt never routes to is a tool the model
+  has to guess about.
+- `the_terse_prompt_keeps_the_design_pointer` — `TERSE_PROMPT` contains
+  `UI work` and `cannot see the page`.
 
-**Status: done.** The test failed for the expected reason:
-`the grep block holds arguments that are not its own: "{\"path\":\"Cargo.toml\"}"`.
-The first block stayed empty; the second held the first call's fragment.
+**Check:** `$env:CARGO_TARGET_DIR="B:\cargo-target-rust-agent"; cargo test --lib prompts::tests`
+— the five new tests fail, the five existing ones pass. The
+`the_prompt_names_every_registered_tool` failure message names exactly which
+tools the prompt never mentions, which is what step 3 then fixes.
 
-### 2. Carry part identity through argument streaming
+### 2. Write the frontend-design section into `SYSTEM_PROMPT`
 
-- `Emitter` keeps one buffer per part (`BTreeMap<usize, String>`) and flushes /
-  offers each part separately.
-- `Event::ToolArgsDelta` becomes `{ part: usize, json: String }`.
-- `ToolBlock` keeps the raw JSON being streamed so the display can be rebuilt;
-  `App` routes a delta to the block with `streaming && part == Some(part)`,
-  renders `rig::streaming::parse_partial_arguments` through the existing
-  `summarize_args`, and updates the activity row carrying that part.
-- `Activity` gains `part: Option<usize>`, set only by `ToolCallStreaming`;
-  `ToolCallStarted` replaces the matching row by part, falling back to the
-  existing title lookup when the provider never opened a part.
-- Remove the global `pending_args` field and its clears.
+One section, condensed from `SKILL.md` and written in the prompt's existing
+voice, covering: the rendered result is the deliverable; state the four
+decisions (subject and audience, four-to-six named hex palette with the one
+that carries, typefaces and their roles, the layout concept) before writing
+markup; take the material from the subject rather than decoration; spend the
+boldness in one place; the named tells of a generated page; the accessibility
+floor (phone width, visible focus, `prefers-reduced-motion`, contrast); copy as
+design content; and the honest verification limit.
 
-**Check:** `cargo test --test stream_render concurrent_tool_arguments` passes,
-and `cargo test --test stream_render` stays green.
+**Check:** `cargo test --lib prompts::tests` — the design tests from step 1
+pass, and every pre-existing prompt test still passes (the stage labels, the
+`cargo check` / `unverified` / denial wording, and the terse ratio: `SYSTEM_PROMPT`
+grew, so terse×2 stays comfortably under it).
 
-**Status: done.** `concurrent_tool_arguments_stay_with_their_own_call` passes,
-and all 48 `stream_render` tests pass. The emitter buffers by part, the event
-carries the part, the block rebuilds its summary from its own raw JSON, and the
-activity row is matched by part before the title fallback.
+### 3. Add the tool-use map to `SYSTEM_PROMPT`
 
-### 3. Add a failing test for approval through a symlink out of the workspace
+One short block naming each registered tool and the job it is for: find before
+reading (`grep` for text, `glob` for paths, `list_dir` to orient); read the
+part of a long file you need with `start_line`/`end_line`; `edit_file` for a
+change to an existing file, `write_file` for a new one or a whole-file
+replacement; `shell` for the project's own build/test command, one command per
+call. For UI work specifically: grep the markup for the class names about to
+change, read the stylesheet before adding a rule.
 
-Add `a_path_through_a_link_outside_is_asked_about_by_its_real_target` to
-`tests/approval.rs`. Create a workspace root, a sibling `outside` directory
-with `secret.txt`, and a directory link `project/link -> outside` using
-`common::make_dir_link` (return early if the platform refuses the link).
-Approve everything, read `link/secret.txt`, and assert:
+**Check:** `cargo test --lib prompts::tests` —
+`the_prompt_names_every_registered_tool` passes, and the prompt tests that were
+green stay green. If that test already passed in step 1, the current
+`SYSTEM_PROMPT` names every tool and this step is dropped rather than padded:
+the map is written only for the tools the failure message named.
 
-- the read succeeds after one access question;
-- the access prompt's preview and detail name the **real** outside directory;
-- `workspace.reach_of("cat link/secret.txt")` reports the real outside file.
+### 4. Add the two-line design pointer to `TERSE_PROMPT`
 
-**Check:** `cargo test --test approval through_a_link` fails on the current
-code (the read is refused after approval, and the prompt names the link).
+Two lines (~140 characters) naming the design discipline and the honest limit,
+inside the 148 characters of headroom the 900-character cap leaves.
 
-**Status: done.** The test failed for the expected reason: after the access
-question was approved, `read link/secret.txt` still returned
-`'link/secret.txt' is outside the workspace`.
+**Check:** `cargo test --lib prompts::tests` —
+`the_terse_prompt_keeps_the_design_pointer`,
+`the_terse_prompt_is_actually_terse` and
+`the_terse_prompt_keeps_the_load_bearing_rules` all pass. If the cap fails, the
+pointer is trimmed rather than the cap raised: the cap is what keeps the
+`terse`/`full` comparison meaningful.
 
-### 4. Resolve approvals against the real target
+### 5. Sharpen the seven tool descriptions in `src/tools.rs`
 
-- Add `Workspace::real_target_of(&self, path)` that resolves lexically and then
-  canonicalises the deepest existing ancestor, **without** a containment check.
-  Reuse the existing walk in `real_target` by splitting it into a pure
-  canonical-ancestor step plus the `allows` test.
-- `Runtime::resolve_asking` uses `real_target_of` for the prompt and the grant,
-  so the user sees and grants the directory the path really reaches.
-- `Workspace::target_of_word` canonicalises a command word only when the whole
-  path exists; a nonexistent target keeps its lexical form. This makes the
-  shell reach scan see an existing link's real target without changing the
-  display of paths that do not exist.
+Each description gains the one thing it is missing — when to reach for this
+tool over its neighbour, and what to do with what comes back — without
+repeating the parameter schema:
 
-**Check:** `cargo test --test approval through_a_link` passes;
-`cargo test --test approval` and `cargo test workspace` stay green.
+- `read_file`: locate first with `grep`/`glob`; use the line range for a long
+  file; a long result is elided at both ends and says how much was dropped.
+- `write_file`: for a new file or a whole-file replacement; for a small change
+  to an existing file, `edit_file` is the tool.
+- `edit_file`: keep the existing text; add that a refusal for a changed file
+  means re-reading it (already stated in `read_file`) — one copy only.
+- `list_dir`: for orienting in an unfamiliar directory; `glob` finds files by
+  name, `grep` finds text.
+- `grep`: a regular expression, over a file or a tree; results read
+  `path:line: content`; the cap is reported when it bites; `ignored` reaches
+  into `.gitignore`d paths.
+- `glob`: a pattern from the workspace root, for finding files rather than text.
+- `shell`: the platform's shell; one command per call; the file tools for
+  reading and writing, this tool for build and test commands.
 
-### 5. Show the reason on a collapsed non-OK tool row
+Add a unit test in `src/tools.rs`'s `tests` module pinning the budget those
+descriptions spend, since they are counted into every request: each description
+is non-empty and under 500 characters, and the seven together stay under 2500.
 
-In `render_tool_block`, after the collapsed header, add one indented line with
-the first non-empty line of the result when `block.done` and the outcome is
-`Failed`, `Denied`, or `Cancelled`. Color it with the outcome's existing color.
-Successful calls keep the one-row form.
+**Check:** `cargo test --lib tools::tests` passes, including the new budget
+test, and the diff of the seven descriptions is read once against the list
+above. Prose has no behavioural test; the schema-budget test is the part of it
+that can fail.
 
-**Check:** a new test in `tests/stream_render.rs` feeds a failed result and
-asserts the collapsed transcript contains the error's first line without the
-block being expanded; `cargo test --test stream_render` stays green.
+### 6. Full verification
 
-### 6. Run the full gate and a live smoke test
+**Check:** `cargo test` (all targets), `cargo clippy --all-targets` and
+`cargo fmt --check` clean. Two `tests/stream_render.rs` failures
+(`messages_are_separated_by_blank_lines`,
+`text_stream_paints_into_the_transcript`) pre-date this work from the
+interrupted UI restyle and are reported as baseline, not as a regression, only
+after reproducing them on the same revision without this diff.
 
-**Check:**
+## Not doing
 
-- `cargo fmt --check`
-- `cargo test --all-targets --locked`
-- `cargo clippy --all-targets --all-features --locked -- -D warnings`
-- `$env:LLM_MODEL='qwen3.5:0.8b'; "y" | cargo run --quiet --example live -- "list the files in src, read Cargo.toml, and tell me the package name"`
+- **No new tool.** A `design_guide` tool would return static text that a prompt
+  can carry for free in the `full` style; the user chose prompt-only.
+- **No browser or screenshot tool.** The agent cannot see a rendered page and
+  no tool for it exists in this build; step 2 states that limit rather than
+  pretending to verify visually.
+- **`SKILL.md` is left alone.** It is the reference the prompt is condensed
+  from, not a target.
+- **No change to `LLM_PROMPT_STYLE`'s default.** `terse` stays the default; the
+  design pointer is what keeps UI work from being unprompted in that arm.
 
-The live run must finish with a final answer and at least two tool results.
+## Outcome
 
-## Critique (fresh pass)
+Executed. Evidence:
 
-Questions from `ds-plan-loop`:
+| Step | What landed | Check and result |
+|------|-------------|------------------|
+| 1–2 | `SYSTEM_PROMPT` gained a "Which tool to use." paragraph and the frontend-design section condensed from `SKILL.md`; `TERSE_PROMPT` gained the two-line UI pointer | `cargo test --lib prompts::tests` → 10 passed, 0 failed |
+| 2 | Prompt-integrity guards added: tool coverage, design-before-markup, generated-page tells, "cannot see the page", no tripled newline, wrapped-sentence line break, terse pointer | same run; the tells test failed first on purpose, then passed |
+| 3 | Rendered text of both constants dumped and read once to check the escaped source actually reads as intended (temporary test, removed after) | read |
+| 4–5 | 4 of the 7 tool descriptions rewritten: `read_file`, `write_file`, `list_dir`, `glob` | `cargo test --lib tools::tests` → 25 passed; new `the_tool_descriptions_stay_inside_their_budget` passes |
+| 6 | Whole suite | `cargo test` → 0 failed across all targets, `tests/stream_render` 48/48 |
 
-- **Missing step?** No migration or config change is needed. Formatting and
-  docs are covered by the comments in each step and the gate in step 6. The
-  history limit is explicitly excluded in finding 4 rather than silently
-  dropped.
-- **Unchecked assumption?** The end-to-end test assumes rig's mock emits one
-  `Start` per tool part and preserves part indices under interleaving. That is
-  how `StreamEvent::Start { part, .. }` and the mock's `call_index` work in rig
-  0.44; step 1 will confirm it by failing for the expected reason before any
-  production change. `parse_partial_arguments` is re-exported at
-  `rig::streaming::parse_partial_arguments` (rig-core `json_utils` re-export),
-  so no new dependency is needed.
-- **Simpler path?** Yes for one part: the shell-scan canonicalisation could be
-  dropped. It is kept because the same link that defeats `read_file` also makes
-  `gate_reach` report nothing, and it is one `canonicalize().unwrap_or(...)` on
-  an existing path. It is still bounded to the approval layer, not a sandbox
-  claim.
+Deviations from the plan as written:
 
-Revisions after critique:
-
-- Step 1 now says the test must fail **for the expected reason** (first block
-  empty), not merely fail.
-- Step 3 asserts the prompt names the real directory, not just that the read
-  eventually succeeds, so the test pins the UX defect as well as the grant.
-- Step 4 splits the existing `real_target` walk rather than duplicating it, so
-  the containment check and the display path cannot drift.
-- Step 5 is limited to non-OK outcomes; a successful call's one-row form and
-  the existing collapsed-by-default test are untouched.
-
----
-
-# PLAN 2 — OpenCode-style TUI
-
-## Goal
-
-nova-lite's TUI adopts OpenCode's layout language: terminal-default background,
-no left rail, no live activity side panel, `❯`-prefixed user prompts, plain
-assistant text, dim tool rows, and a model/context footer bar — keeping the
-existing architecture, folding, scroll behaviour and safety properties intact.
-
-## Decisions
-
-- **TUI render only.** `App.activity` / `Activity` / `ActivityKind` keep being
-  maintained by the event pipeline; the render path stops drawing them. They
-  stay read by `examples/eval.rs`, `examples/live.rs` and
-  `examples/wifi_scanner.rs`, so `src/app.rs` is not edited beyond stale
-  comments. Note: for the TUI the activity vector becomes write-only state.
-- Grouping/folding, the caret, the top-header spinner, scroll clamping and
-  `BodyCache` all stay as they are.
-- The rail's TOOLS list is dropped (decorative; the transcript and `/help`
-  carry it). Its numbers (model, ctx%, calls, tokens) move to the footer.
-- The input box's `➤` send button is dropped (OpenCode has none); Enter still
-  sends, the `❯` prompt and placeholder stay.
-- `BG` becomes `Color::Reset` (terminal default). Safe: no test asserts a
-  background, and the only `.fg(BG)` chip is the `➤` button this plan deletes.
-
-## Steps
-
-### 1. Layout rewrite: single column, no rail, no activity panel, no painted page
-
-One coherent rewrite of `draw` and the palette, plus the cleanup it orphans:
-
-- `draw` becomes single-column at every width: delete `render_activity`,
-  `activity_style`, `activity_width`, `ACTIVITY_MIN_COLUMN`/`_MIN_WIDTH`/
-  `_MAX_WIDTH`, `render_rail`, `RAIL_WIDTH`, `RAIL_MIN_SCREEN`, and the `RAIL`
-  colour.
-- `BG` → `Color::Reset` at every background site (page, transcript, header,
-  footer); the input box keeps its rounded border but loses its PANEL fill.
-- Footer takes over the rail's numbers: model name chip at the front, then the
-  existing ctx% indicator, calls and tokens — reuse `short_count`, which today
-  has only rail callers. Keep the segment-dropping logic.
-- Live reasoning moves into the transcript as a dim italic tail (last ~6
-  lines) under the streaming assistant block, extracted from
-  `render_activity`'s tail code. It re-wraps each frame and deliberately does
-  not go through `BodyCache` (it changes every tick).
-- Cleanup required by `-D warnings`: trim the `use crate::app::{Activity,
-  ActivityKind, …}` import, and keep or delete `section` (render.rs:868)
-  according to whether a surviving call site (the group heading) still uses
-  it.
-- Stale docs updated in the same diff: the module doc + ASCII diagram
-  (render.rs:2-10) and the rail/panel/header comments at render.rs:633-635,
-  835, 931-933, 1053-1056, 1639-1644; `src/app.rs:297`, `:733-737`, `:2733`;
-  the rail reference in `Cargo.toml:13`; the activity-panel premise in
-  `tests/redraw_cost.rs:107-110`.
-
-**Check:** `cargo test --test stream_render` passes after replacing
-`tool_call_and_result_appear_in_the_activity_timeline` with a transcript-row
-test, replacing
-`narrow_terminal_drops_the_activity_panel_without_panicking` with a
-narrow-terminal-renders-the-transcript test, deleting
-`the_rail_and_the_activity_panel_are_framed_by_rules`, deleting the now-unused
-`activity_column` helper, and dropping
-`the_activity_panel_does_not_grow_with_the_terminal`; `cargo test --test
-model_picker` passes after removing the two `.expect("the activity panel…")`
-assertions in `the_picker_stays_inside_the_conversation_panel`; `cargo
-clippy --all-targets -- -D warnings` is clean (this is what catches the
-orphans); `cargo run --example preview` output has no rail column.
-
-### 2. Message rows go OpenCode-style
-
-- User: `❯ content` with continuations indented two spaces, in ACCENT. This is
-  new code, not a `wrap_prefixed` call — `wrap_prefixed` applies one prefix to
-  every line. Reuse the hand-rolled `❯ ` + `  ` shape already implemented in
-  `render_input`; leave the shared `BODY_INDENT` (`"   "`, used by tool bodies
-  and group digests) alone.
-- Assistant: the per-message header row (marker, label, age, header spinner)
-  is removed; the markdown body stands alone. Working state stays in the top
-  header row via `status_of`; the caret stays on the body.
-- System: dim italic body, no header.
-- Delete `spinner_frame` and `age` once orphaned. The dim "responding…" word
-  above a streaming tool group stays.
-
-**Check:** stream_render passes with `text_stream_paints_into_the_transcript`
-and `messages_are_separated_by_blank_lines` rewritten (the `You`/`Agent`
-labels no longer exist; `status_of`'s "Agent online" string does and is
-asserted as the top-header status instead), plus a new test asserting a user
-message renders `❯ ` and no `You` label; `cargo test --test
-render_robustness` passes after `a_streaming_run_says_it_is_responding_and_a_finished_one_does_not`
-drops its `a user header` expectations, its spinner count is retargeted to the
-top header, and its `starts_with('◆')` probe is repointed.
-
-### 3. Tool rows restyled; expanded output loses the box
-
-Collapsed rows keep their one-line form (disclosure, outcome glyph, name,
-args, line-count tail). Expanded: replace the `╭─╮ / │ │ / ╰─╯` card
-(`card_edge`, `card_row`, `pad`) with OpenCode-style output — every result
-line prefixed `▏ ` in the border colour, verdict line unchanged, no top or
-bottom rules. Group headings and folding are untouched.
-
-**Check:** `expanding_a_tool_block_reveals_its_result` and the related card
-tests updated and green (`cargo test --test stream_render`); no `╭`/`│`/`╰`
-glyphs remain in transcript assertions.
-
-### 4. Banner, overlays, full gate
-
-Banner draws on the terminal-default background; picker, approval and slash
-suggestions keep their PANEL fill so they occlude. Then the full gate.
-
-**Check:**
-
-- `cargo test --test banner` passes
-- `cargo fmt --check`
-- `cargo clippy --all-targets --all-features --locked -- -D warnings`
-- `cargo test --all-targets --locked`
-- `cargo run --example preview` (default, `empty`, `expanded`, `folded`)
-  printed for an eyeball diff of the new layout
-
-## Critique (fresh pass)
-
-A separate reviewer read PLAN 2 against `src/render.rs`, `src/app.rs` and the
-test suites. Findings that changed the plan:
-
-- **Step 6 could not have passed.** `tests/model_picker.rs:301`
-  `the_picker_stays_inside_the_conversation_panel` hard-expects the activity
-  panel at `:317` and `:326`. Folded into step 1.
-- **A cleanup step was missing.** Deleting the rail/panel orphans `section`,
-  `RAIL`, `short_count` and the `Activity`/`ActivityKind` import under the
-  crate's `-D warnings` gate, plus the stale docs listed in step 1. Now
-  explicit.
-- **Step 3's premise was wrong.** `wrap_prefixed` (render.rs:1245) repeats one
-  prefix on every line, so the `❯ ` / two-space continuation is new code;
-  `render_input` already implements that shape. Corrected.
-- **Tests the plan had not named:** `render_robustness.rs:350` (user-header
-  expects, spinner count, `◆` probe), `stream_render.rs:153` and `:785`
-  (`You`/`Agent` assertions), and the orphaned `activity_column` helper at
-  `:1194`. All listed now.
-- **Verified safe:** nothing outside `render.rs` references the deleted render
-  helpers; `Activity` is still read by three examples, so `app.rs` stays
-  compile-clean; no test asserts a background; `card_edge`/`card_row`/`pad`
-  have no callers outside `render_tool_block`.
-- **Simplification taken:** steps 1, 2 and 5 of the first draft all rewrote
-  `draw` and would have required three separate test rounds on one function;
-  they are now one step, with the orphan cleanup attached instead of implied.
+- **4 tool descriptions changed, not 7.** `edit_file`, `grep` and `shell` already
+  said what the new prompt paragraph says — the edit/whole-file division, the
+  ignore rules and the capped-result note, the shell name and "prefer the file
+  tools". Rewriting them would have been churn.
+- **Budget caps are 600 per description and 2600 for the seven, not 500/2500.**
+  2500 left no room for a legitimate sentence; the point of the test is to catch
+  a runaway paragraph, not to hold a ceiling that invites shaving accuracy.
+- **The two `stream_render` failures were not a baseline.** An earlier run during
+  the interrupted restyle failed `messages_are_separated_by_blank_lines` and
+  `text_stream_paints_into_the_transcript`; this run is 48/48 green, so no
+  exclusion is needed and none was written into the plan.
+- **No prompt mechanism claim was recorded to memory.** The rendered text is
+  verified by assertion and by the one-time dump; an explanation of the source
+  file's escaping is not something this work established, so it is not written
+  down as fact.

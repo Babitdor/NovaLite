@@ -338,10 +338,13 @@ impl Tool for ReadFile {
     }
 
     fn description(&self) -> String {
-        "Read the contents of a file at the given path, relative to the workspace root. \
-         Reading a file is also what lets edit_file change it: an edit is refused if the \
-         file has changed since you last read it, so read it again after such a refusal. \
-         Pass start_line and end_line to read one part of a long file."
+        "Read the contents of a file at the given path, relative to the workspace \
+         root. Find the file first with glob, or the line you want with grep, rather \
+         than reading a file you have no use for. Reading a file is also what lets \
+         edit_file change it: an edit is refused if the file has changed since you \
+         last read it, so read it again after such a refusal. Pass start_line and \
+         end_line to read one part of a long file; a result too long to return whole \
+         is elided at both ends and says how much was dropped."
             .to_string()
     }
 
@@ -456,7 +459,11 @@ impl Tool for WriteFile {
     }
 
     fn description(&self) -> String {
-        "Write content to a file at the given path, creating parent directories if needed. The path is relative to the workspace root.".to_string()
+        "Write content to a file at the given path, creating parent directories if \
+         needed. This creates a file or replaces one whole; to change part of an \
+         existing file use edit_file, which leaves the rest of it alone. The path is \
+         relative to the workspace root."
+            .to_string()
     }
 
     fn parameters(&self) -> Value {
@@ -797,7 +804,10 @@ impl Tool for ListDir {
     }
 
     fn description(&self) -> String {
-        "List the contents of a directory, relative to the workspace root.".to_string()
+        "List the contents of a directory, relative to the workspace root. Use it to \
+         orient in a directory you have not seen; glob finds files by name, grep finds \
+         text inside them, and this says what is there."
+            .to_string()
     }
 
     fn parameters(&self) -> Value {
@@ -990,7 +1000,8 @@ impl Tool for Glob {
 
     fn description(&self) -> String {
         "Find files and directories whose paths match a glob pattern (e.g. '**/*.rs'), \
-         searched from the workspace root. The search respects .gitignore and .ignore; set \
+         searched from the workspace root. Use it to find files by name or extension; \
+         grep finds text inside them. The search respects .gitignore and .ignore; set \
          ignored to search them anyway. Results are capped, and a capped result says so."
             .to_string()
     }
@@ -1063,6 +1074,36 @@ mod tests {
 
     fn tmp_path(name: &str) -> std::path::PathBuf {
         test_root().join(format!("rust_agent_test_{}_{}", std::process::id(), name))
+    }
+
+    /// The seven descriptions are counted into every request's budget, so a
+    /// paragraph added here is paid for on every call. This is the part of
+    /// that prose which can fail: prose has no behavioural test.
+    #[test]
+    fn the_tool_descriptions_stay_inside_their_budget() {
+        let descriptions: Vec<(&str, String)> = vec![
+            (ReadFile::NAME, ReadFile::new(rt()).description()),
+            (WriteFile::NAME, WriteFile::new(rt()).description()),
+            (EditFile::NAME, EditFile::new(rt()).description()),
+            (Shell::NAME, Shell::new(rt()).description()),
+            (ListDir::NAME, ListDir::new(rt()).description()),
+            (Grep::NAME, Grep::new(rt()).description()),
+            (Glob::NAME, Glob::new(rt()).description()),
+        ];
+        assert_eq!(
+            descriptions.len(),
+            TOOL_NAMES.split(", ").count(),
+            "a tool was added without a description in this test"
+        );
+
+        let mut total = 0;
+        for (name, text) in &descriptions {
+            let size = text.chars().count();
+            total += size;
+            assert!(!text.is_empty(), "{name} has no description");
+            assert!(size < 600, "{name}'s description is {size} characters");
+        }
+        assert!(total < 2600, "the descriptions total {total} characters");
     }
 
     #[tokio::test]
